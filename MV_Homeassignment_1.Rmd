@@ -1,0 +1,913 @@
+---
+title: "Homework assignment 1"
+subtitle: "Data Science 2: Machine Learning Tools - CEU 2021"
+author: "Viktória Mészáros"
+date: "18/03/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+```{r set up, include=F}
+rm(list = ls())
+library(tidyverse)
+library(data.table)
+library(DiagrammeR)
+library(data.tree)
+library(rpart)
+library(rpart.plot)
+library(caret)
+library(pROC)
+library(gbm)
+library(kableExtra)
+
+# h2o.init()
+# h2o.shutdown()
+```
+
+## 1. Tree ensemble models
+
+In this task I will work with the OJ dataset from the ISLR package. The goal is to predict which of the juices is chosen in a given purchase situation.
+For this task I was not able to use H2O as I have Windows and I would not be able to run XGBoost, so insteard I decided to use caret. 
+
+```{r, echo=F, message=F, warning=F}
+data <- as_tibble(ISLR::OJ)
+# skimr::skim(data)
+```
+
+
+
+
+## Old but gold best of all CARET
+**a)** *Create a training data of 75% and keep 25% of the data as a test set. Train a decision tree as a benchmark model. Plot the final model and interpret the result (using rpart and rpart.plot is an easier option).*
+
+#### Create training and test set
+```{r data, message=F, warning=F}
+# set my seed
+my_seed <- 20210319
+
+# split the data to 75% training and 25% test locally 
+set.seed(my_seed)
+
+training_ratio <- 0.75
+
+train_indices <- createDataPartition(
+  y = data[["Purchase"]],
+  times = 1,
+  p = training_ratio,
+  list = FALSE
+) %>% as.vector()
+
+data_train_l <- data[train_indices, ]
+data_test_l <- data[-train_indices, ]
+```
+
+
+#### Decision tree 
+I trained a decision tree as a banchmark model. For this I used cart rpart2, as here I can set the  maxdepth for my tree (in rpart you can set the complexity parameter). I tried out different depth parameter in the tune grid to find the best. From the table below you can see that we get the best model with **maxdepth = 5**. You can also see that the accuracy of the best model is **81.2%**. 
+```{r,  echo=F, message=F, warning=F, cache=T}
+# set the seed to get the same results even when running several times
+set.seed(my_seed)
+
+# built simple tree (tune for different maxdepth values)
+simple_tree_grid <- train(Purchase ~ .,
+    data = data_train_l, 
+    method = "rpart2",
+    tuneGrid= data.frame(maxdepth=c(2,3,4,5,6,7,8,9,10))
+  )
+
+simple_tree_grid$results[,1:2] %>% 
+  kbl() %>% 
+  kable_classic(full_width = F, html_font = "Cambria")
+ 
+
+```
+
+A simple tree is a really easily understandable method, especially if you plot it. It shows a straight forward decision path following which you get to one final node. As I found out from the table above that the best depth is 5, my best tree will have 5 layers. 
+Here you see the simple tree for our data. If we want to interpret it this shows that if a brand loyalty for CH 0.48 or more, and the sales price difference (MM - CH) is greater or equal to -0.39 the model predicts that the customer will by CH, on the other hand if price difference is below -0.39, the customer is predicted to choose the MM juice. We can do this for all the branches of our tree. To use this for prediction and a new observation/customer comes we just look if their customer brand loyalty for CH is greater or equal or lower than 0.48 and continue on the corresponding branch. 
+```{r, echo=F, message=F, warning=F}
+ 
+rpart.plot(simple_tree_grid$finalModel, tweak=1, digits=2, under = TRUE)
+
+```
+
+**b)** *Investigate tree ensemble models: random forest, gradient boosting machine, XGBoost. Try various tuning parameter combinations and select the best model using cross-validation.*
+
+I used 5-fold cross validation to find the best tuning parameters in all cases.
+
+#### Random forest
+I built 3 different random forest models. In the 1st I used only some little tuning, in the second I applied a more complex tuning grid and the last one is done by auto tuning.
+
+```{r, echo=F, message=F, warning=F, cache=T}
+# set train control for 5-fold cross validation
+train_control <- trainControl(
+  method = "cv",
+  n = 5,
+  classProbs = TRUE,
+  savePredictions = TRUE,
+  summaryFunction = twoClassSummary,
+  verboseIter = FALSE
+)
+
+
+# set tune grid
+rf_grid <- expand.grid(
+  .mtry = c(5, 7, 9),
+  .splitrule = "gini",
+  .min.node.size = c(5, 10, 15)
+)
+
+# build rf model
+set.seed(my_seed)
+rf_model <- train(
+  Purchase~.,
+  method = "ranger",
+  metric = "ROC",
+  data = data_train_l,
+  tuneGrid = rf_grid,
+  trControl = train_control,
+  importance = "impurity"
+  
+)
+
+# rf_model$results
+# rf_model$bestTune
+
+
+# ----------------------------------------------------------------------------------------
+
+# set tune grid
+rf_grid2 <- expand.grid(
+  .mtry = c(5, 6, 7, 8, 9, 11, 13, 15),
+  .splitrule = "gini",
+  .min.node.size = c(5, 10, 15, 20)
+)
+
+# build rf model
+set.seed(my_seed)
+
+rf_model_2 <- train(
+  Purchase~.,
+  method = "ranger",
+  metric = "ROC",
+  data = data_train_l,
+  tuneGrid = rf_grid2,
+  trControl = train_control,
+  importance = "impurity")
+  
+# rf_model_2$results
+# rf_model_2$bestTune
+
+
+# ----------------------------------------------------------------------------------------
+
+## Autotune
+set.seed(my_seed)
+
+rf_model_auto <- train(
+    Purchase~.,
+    data = data_train_l,
+    method = "ranger",
+    metric = "ROC",
+    trControl = train_control,
+    importance = "impurity"
+  )
+
+
+# rf_model_auto$results
+# rf_model_auto$bestTune
+
+```
+
+
+#### Boosting 
+For gradient boosting I also built 2 separate models, one with less tuning parameters and one with more.
+
+```{r, echo=F, message=F, warning=F, cache=T}
+gbm_grid <-  expand.grid(interaction.depth = c(1, 5, 10), 
+                         n.trees = (4:10)*50,
+                         shrinkage = 0.1,
+                         n.minobsinnode = 20 
+)
+
+
+set.seed(my_seed)
+
+gbm_model <- train(Purchase ~.,
+                     data = data_train_l,
+                     method = "gbm",
+                     metric = "ROC",
+                     trControl = train_control,
+                     verbose = FALSE,
+                     tuneGrid = gbm_grid)
+
+# gbm_model$results
+# gbm_model$bestTune
+
+
+# --------------------------------------------------------------------------------------
+
+gbm_grid2 <-  expand.grid(interaction.depth = c(1, 3, 5, 7, 9, 11), 
+                           n.trees = (1:10)*50, 
+                           shrinkage = c(0.02, 0.05, 0.1, 0.15, 0.2), 
+                           n.minobsinnode = c(5,10,20,30))
+
+
+set.seed(my_seed)
+system.time({
+  gbm_model_2 <- train(Purchase ~.,
+                      data = data_train_l,
+                      method = "gbm",
+                      metric = "ROC",
+                      trControl = train_control,
+                      verbose = FALSE,
+                      tuneGrid = gbm_grid2)
+})
+
+# gbm_model_2$results
+# gbm_model_2$bestTune
+
+```
+
+
+#### XGBoost
+And lastly I also built a XGBoost model.
+
+```{r, message=F, warning=F, cache=T}
+
+xg_grid <-  expand.grid(
+        nrounds=c(350),
+        max_depth = c(2, 3, 4, 5),
+        eta = c(0.03,0.05, 0.06),
+        gamma = c(0.01),
+        colsample_bytree = c(0.5),
+        subsample = c(0.75),
+        min_child_weight = c(0))
+
+set.seed(my_seed)
+    
+xgb_model <- train(
+        Purchase ~.,
+        method = "xgbTree",
+        metric = "ROC",
+        data = data_train_l,
+        tuneGrid = xg_grid,
+        trControl = train_control
+    )
+
+```
+
+
+
+**c)** *Compare the performance of the different models (if you use caret you should consider using the resamples function). Make sure to set the same seed before model training for all 3 models so that your cross validation samples are the same. Is any of these giving significantly different predictive power than the others?*
+
+I made sure to set the same seed (my_seed) when running all of my models. As this is a two-class problem I used the "twoClassSummary" function in the train control so I was able to get the area under the ROC curve, the sensitivity and specificity for my models. To choose the best one I will decide based on the ROC values, the bigger the better.
+
+```{r, echo=F, message=F, warning=F}
+summary <- resamples(
+  list("Random Forest" = rf_model,
+       "Random Forest more tuning" = rf_model_2,
+       "Random Forest auto tune" = rf_model_auto,
+       "GBM" = gbm_model,
+       "GBM more tuning" = gbm_model_2,
+       "XGBoost" = xgb_model))
+
+
+summary(summary)
+```
+
+This table only summaries the most important values for us the area under the ROC curve. The models are really close to each other, there is no significant difference in their performance. The best model based on this is the 2nd GBM model with more complex tuning. 
+
+```{r, echo=F, message=F, warning=F}
+my_models <- list( "rf_model", "rf_model_2", "rf_model_auto", "gbm_model", "gbm_model_2", "xgb_model")
+
+rf_model$results$ROC
+ROC <- c()
+
+for (i in my_models) {
+  ROC[i]  <- max(get(i)$results$ROC)
+}
+
+ROC %>% 
+  kbl(col.names = "ROC") %>% 
+  kable_classic(full_width = F, html_font = "Cambria")
+
+```
+
+
+**d)** *Choose the best model and plot ROC curve for the best model on the test set. Calculate and interpret AUC.*
+
+```{r, echo=F, message=F, warning=F}
+pred_prob <- predict(gbm_model_2, newdata = data_test_l, type = "prob")
+data_test_l[,"pred"] <- pred_prob[, "CH"]
+
+```
+
+The best model I used was gbm_model_2. For this the ROC curve looks like this.
+```{r, include=F}
+# this should NOT be done, I did it just for my interest, I calculated the AUC values for all models I built to see how they perform. This should only be done on a validation set, and test set shoul only be used to look at model performance!
+
+AUC <- c()
+
+for (i in my_models) {
+pred_prob <- predict(get(i), newdata = data_test_l, type = "prob")
+data_test_l[,"pred"] <- pred_prob[, "CH"]
+roc_obj <- roc(data_test_l$Purchase, data_test_l$pred)
+AUC[i] <- roc_obj$auc
+}
+
+AUC %>% 
+  kbl() %>% 
+   kable_classic(full_width = F, html_font = "Cambria")
+
+# based on this the best model on the test set is the 2nd random forest followed by the simpler random forest and then by my chosen model the 2nd GBM model
+```
+
+
+```{r, echo=F, message=F, warning=F, fig.align='center', out.width="60%"}
+library(viridis)
+
+roc_obj <- roc(data_test_l$Purchase, data_test_l$pred)
+all_coords <- coords(roc_obj, x="all", ret="all", transpose = FALSE)
+  
+ggplot(data = all_coords, aes(x = fpr, y = tpr)) +
+    geom_line(color="cyan4", size = 0.7) +
+    geom_area(aes(fill = "cyan4", alpha=0.4), alpha = 0.3, position = 'identity', color = "cyan4") +
+    scale_fill_viridis(discrete = TRUE, begin=0.6, alpha=0.5, guide = FALSE) +
+    xlab("False Positive Rate (1-Specifity)") +
+    ylab("True Positive Rate (Sensitivity)") +
+    geom_abline(intercept = 0, slope = 1,  linetype = "dotted", col = "black") +
+    theme_minimal()
+
+
+```
+You can see that the model have quite nice power as the curve is quite distant from the 45°line. And the area under the curve is quite big. It is 0.87 which is a bit lower that what we have for the training set, but not much lower, which means that the model is working nicely for the test data as well.  This AUC means that there is a 86.6% probability that our model will be able to distinguish between the two classes.
+
+```{r, echo=F, message=F, warning=F}
+
+roc_obj$auc
+
+```
+
+
+
+
+**e)** *Inspect variable importance plots for the 3 models. Are similar variables found to be the most important for the 3 models?*
+
+Yes, they are really similar. Actually the top 3 most important variables are the same for all three models, these are LoyalCH (brand loyalty to CH), PriceDiff (price difference between the juices) and StoreID.
+```{r, echo=F, message=F, warning=F, out.width="33%"}
+
+plot(varImp(rf_model_2))
+
+plot(varImp(gbm_model_2))
+
+plot(varImp(xgb_model))
+```
+
+## 2. Variable importance profiles
+
+For this exercise I will use the Hitters dataset and predict log_salary.
+
+```{r, include=F}
+rm(list = ls())
+
+
+data <- as_tibble(ISLR::Hitters) %>%
+  drop_na(Salary) %>%
+  mutate(log_salary = log(Salary), Salary = NULL)
+
+
+```
+
+**a)** *Train two random forest models: one with sampling 2 variables randomly for each split and one with 10 (use the whole dataset and don’t do cross-validation). Inspect variable importance profiles. What do you see in terms of how important the first few variables are relative to each other?*
+
+In this exercise I don't do cross validation and use my whole dataset to train my models.
+
+First I build 2 random forest models. I used several tuning parameters, but for one of them the model always chooses from 2 variables at each split, for the other it chooses from 10 (for this I need to set mtries = 2 or 10).
+```{r, include=F}
+
+library(h2o)
+
+
+h2o.init()
+h2o.no_progress()
+
+h2o_data <- as.h2o(data)
+
+y <- "log_salary"
+X <- setdiff(names(h2o_data), y)
+
+# set my seed
+my_seed <- 20210319
+
+
+# mtries = 2 -----------------------------------------------------------------------------------
+
+rf_params <- list(
+  ntrees = c(10, 50, 100, 300, 500),
+  mtries = c(2),
+  sample_rate = c(0.2, 0.632, 1),
+  max_depth = c(10, 20, 30)
+)
+
+
+rf_grid_2 <- h2o.grid(
+  "randomForest", x = X, y = y,
+  training_frame = h2o_data,
+  grid_id = "rf_2",
+  seed = my_seed,
+  hyper_params = rf_params
+)
+
+
+h2o.getGrid(rf_grid_2@grid_id, "mae")
+
+best_rf_2 <- h2o.getModel(
+  h2o.getGrid(rf_grid_2@grid_id, "mae")@model_ids[[1]]
+)
+# the best model has max depth of 20, 300 trees and a sample rate of 0.632
+
+h2o.mae(h2o.performance(best_rf_2))
+
+
+
+# mtries = 10 --------------------------------------------------------------------------------
+
+rf_params <- list(
+  ntrees = c(10, 50, 100, 300, 500),
+   mtries = c(10),
+  sample_rate = c(0.2, 0.632, 1),
+  max_depth = c(10, 20, 30)
+ 
+)
+
+rf_grid_10 <- h2o.grid(
+  "randomForest", x = X, y = y,
+  training_frame = h2o_data,
+  grid_id = "rf_10",
+  seed = my_seed,
+  hyper_params = rf_params
+)
+
+
+h2o.getGrid(rf_grid_10@grid_id, "mae")
+
+best_rf_10 <- h2o.getModel(
+  h2o.getGrid(rf_grid_10@grid_id, "mae")@model_ids[[1]]
+)
+# best tree has 30 as max depth 50 trees and 0.2 sample rate 
+
+h2o.mae(h2o.performance(best_rf_10))
+
+
+```
+
+Here you can see the variable importance plots for the two models. It is visible that sampling 2 variables randomly for each split many variables have similar importance, but when sampling from 10 there are higher differences in the importance. There are 6 variables for mtries = 2 with an importance above 0.5, while for mtries = 10 there are only 2.  
+
+
+```{r, echo=F, message=F, warning=F, out.width="50%"}
+## variable importance plots
+
+h2o.varimp_plot(best_rf_2)
+
+h2o.varimp_plot(best_rf_10)
+```
+
+
+**b)** *One of them is more extreme in terms of how the most important and the next ones relate to each other. Give an intuitive explanation how mtry/mtries relates to relative importance of variables in random forest models.*
+
+The explanation of this is due to that for mtries = 10 the model can choose from 10 randomly chosen variables (out of 20) at each step. So in many cases it has the opportunity to chose the same most significant one. As the variables are the same if like in this case CAtBat gets to the random 10 the model will always chose that to split. This leads to that several trees have the same variables in them. On the other hand for mtrieds = 2 the model only has 2 option to chose from at each split. This leads to more variability across the trees, and this decreases correlation between the tress and thus improve the variance reduction.
+
+
+
+
+**c)** *In the same vein, estimate two gbm models with varying rate of sampling for each tree (use 0.1 and 1 for the parameter bag.fraction/sample_rate). Hold all the other parameters fixed: grow 500 trees with maximum depths of 5, applying a learning rate of 0.1. Compare variable importance plots for the two models. Could you explain why is one variable importance profile more extreme than the other?*
+
+
+```{r, echo=F, message=F, warning=F}
+gbm_params <- list(
+  learn_rate = 0.1,  
+  ntrees = 500,
+  max_depth = 5,
+  sample_rate = 0.1
+)
+
+gbm_grid_0.1 <- h2o.grid(
+  "gbm", x = X, y = y,
+  grid_id = "gbm_0.1",
+  training_frame = h2o_data,
+  seed = my_seed,
+  hyper_params = gbm_params
+)
+
+
+h2o.getGrid(gbm_grid_0.1@grid_id, "mae")
+
+best_gbm <- h2o.getModel(
+  h2o.getGrid(gbm_grid_0.1@grid_id, "mae")@model_ids[[1]]
+)
+
+h2o.mae(h2o.performance(best_gbm))
+
+
+```
+
+```{r, echo=F, message=F, warning=F}
+gbm_params_2 <- list(
+  learn_rate = 0.1,  
+  ntrees = 500,
+  max_depth = 5,
+  sample_rate = 1
+)
+
+gbm_grid_2 <- h2o.grid(
+  "gbm", x = X, y = y,
+  grid_id = "gbm_1",
+  training_frame = h2o_data,
+  seed = my_seed,
+  hyper_params = gbm_params_2
+)
+
+h2o.getGrid(gbm_grid_2@grid_id, "mae")
+
+best_gbm_2 <- h2o.getModel(
+  h2o.getGrid(gbm_grid_2@grid_id, "mae")@model_ids[[1]]
+)
+
+h2o.mae(h2o.performance(best_gbm_2))
+
+```
+In the case with gradient boosting we also see some difference but it is less extreme. This is due to the nature of the GBM. The variable importance profile fo it is typically more extreme than for random forests, but there is still a difference. Sample rate is the row sampling rate without replacement. This means that at each iteration a subsample of the training data is chosen randomly(0.1 sample rate means at each iteration 10% of training data is chosen) and then this subset is used to fit the data on. Due to this we can see that the variable importance plot is less extreme in case when sample rate is 0.1. When sample rate is 1 it means at each iteration the model is built on the whole training set and thus the variable importance is more extreme. In this case we do not incorporate randomness as an integral part of the procedure.
+
+```{r, echo=F, message=F, warning=F, out.width="50%"}
+h2o.varimp_plot(best_gbm)
+
+h2o.varimp_plot(best_gbm_2)
+```
+
+
+
+## 3. Stacking
+
+In this problem I am going to predict whether patients actually show up for their medical appointments. 
+
+```{r set up , include=F}
+rm(list = ls())
+h2o.init()
+
+# set my seed
+my_seed <- 20210319
+
+data <- read_csv("KaggleV2-May-2016.csv")
+
+# some data cleaning
+data <- select(data, -one_of(c("PatientId", "AppointmentID", "Neighbourhood"))) %>%
+  janitor::clean_names()
+
+# for binary prediction, the target variable must be a factor + generate new variables
+data <- mutate(
+  data,
+  no_show = factor(no_show, levels = c("Yes", "No")),
+  handcap = ifelse(handcap > 0, 1, 0),
+  across(c(gender, scholarship, hipertension, alcoholism, handcap), factor),
+  hours_since_scheduled = as.numeric(appointment_day - scheduled_day)
+)
+
+# clean up a little bit
+data <- filter(data, between(age, 0, 95), hours_since_scheduled >= 0) %>%
+  select(-one_of(c("scheduled_day", "appointment_day", "sms_received")))
+```
+
+
+**a)** *Create train / validation / test sets, cutting the data into 5% - 45% - 50% parts.*
+
+```{r, message=F, warning=F}
+h2o_data_pat <- as.h2o(data)
+
+splitted_data <- h2o.splitFrame(h2o_data_pat, ratios = c(0.05, 0.45), seed = my_seed)
+data_train <- splitted_data[[1]]
+data_valid <- splitted_data[[2]]
+data_test <- splitted_data[[3]]
+
+
+y <- "no_show"
+X <- setdiff(names(data_train), "no_show")
+```
+
+
+**b)** *Train a benchmark model of your choice (such as random forest, gbm or glm) and evaluate it on the validation set.*
+
+I decided to train two basic models as benchmarks, one glm model and one simple tree.
+
+```{r, echo=F, message=F, warning=F}
+
+simple_lm <- h2o.glm(
+  X, y,
+  training_frame = data_train,
+  model_id = "logit",  
+  lambda = 0,
+  nfolds = 5,
+  seed = my_seed
+)
+
+
+h2o.auc(simple_lm, train = TRUE, xval = TRUE)
+h2o.auc(h2o.performance(simple_lm, newdata = data_valid))
+plot(h2o.performance(simple_lm, xval = TRUE), type = "roc")
+
+#plot(h2o.performance(simple_lm, xval = TRUE), type = "pr")
+
+```
+
+
+```{r, echo=F, message=F, warning=F}
+simple_tree <- h2o.randomForest(
+  X, y,
+  training_frame = data_train,
+  model_id = "simple_tree",
+  ntrees = 1, mtries = length(X), sample_rate = 1,
+  max_depth = 2,
+  nfolds = 5,
+  seed = my_seed
+)
+
+h2o.auc(simple_tree, train = TRUE, xval = TRUE)
+h2o.auc(h2o.performance(simple_tree, newdata = data_valid))
+plot(h2o.performance(simple_tree, xval = TRUE), type = "roc")
+
+
+simple_models <- list(simple_lm, simple_tree)
+```
+
+```{r tree plot set up, include=F}
+createDataTree <- function(h2oTree) {
+  
+  h2oTreeRoot = h2oTree@root_node
+  
+  dataTree = Node$new(h2oTreeRoot@split_feature)
+  dataTree$type = 'split'
+  
+  addChildren(dataTree, h2oTreeRoot)
+  
+  return(dataTree)
+}
+
+addChildren <- function(dtree, node) {
+  
+  if(class(node)[1] != 'H2OSplitNode') return(TRUE)
+  
+  feature = node@split_feature
+  id = node@id
+  na_direction = node@na_direction
+  
+  if(is.na(node@threshold)) {
+    leftEdgeLabel = printValues(node@left_levels, na_direction=='LEFT', 4)
+    rightEdgeLabel = printValues(node@right_levels, na_direction=='RIGHT', 4)
+  }else {
+    leftEdgeLabel = paste("<", node@threshold, ifelse(na_direction=='LEFT',',NA',''))
+    rightEdgeLabel = paste(">=", node@threshold, ifelse(na_direction=='RIGHT',',NA',''))
+  }
+  
+  left_node = node@left_child
+  right_node = node@right_child
+  
+  if(class(left_node)[[1]] == 'H2OLeafNode')
+    leftLabel = paste("prediction:", left_node@prediction)
+  else
+    leftLabel = left_node@split_feature
+  
+  if(class(right_node)[[1]] == 'H2OLeafNode')
+    rightLabel = paste("prediction:", right_node@prediction)
+  else
+    rightLabel = right_node@split_feature
+  
+  if(leftLabel == rightLabel) {
+    leftLabel = paste(leftLabel, "(L)")
+    rightLabel = paste(rightLabel, "(R)")
+  }
+  
+  dtreeLeft = dtree$AddChild(leftLabel)
+  dtreeLeft$edgeLabel = leftEdgeLabel
+  dtreeLeft$type = ifelse(class(left_node)[1] == 'H2OSplitNode', 'split', 'leaf')
+  
+  dtreeRight = dtree$AddChild(rightLabel)
+  dtreeRight$edgeLabel = rightEdgeLabel
+  dtreeRight$type = ifelse(class(right_node)[1] == 'H2OSplitNode', 'split', 'leaf')
+  
+  addChildren(dtreeLeft, left_node)
+  addChildren(dtreeRight, right_node)
+  
+  return(FALSE)
+}
+
+GetEdgeLabel <- function(node) {return (node$edgeLabel)}
+GetNodeShape <- function(node) {switch(node$type, split = "diamond", leaf = "oval")}
+GetFontName <- function(node) {switch(node$type, split = 'Palatino-bold', leaf = 'Palatino')}
+```
+
+
+ The simple tree looks like this.
+ 
+```{r, echo=F, message=F, warning=F}
+simple_tree_plot <- h2o.getModelTree(model = simple_tree, tree_number = 1)
+
+Simple_data_tree <- createDataTree(simple_tree_plot)
+
+SetEdgeStyle(Simple_data_tree, fontname = 'Palatino-italic', label = GetEdgeLabel, labelfloat = TRUE,
+             fontsize = "26", fontcolor='cyan4')
+SetNodeStyle(Simple_data_tree, fontname = GetFontName, shape = GetNodeShape, 
+             fontsize = "26", fontcolor='cyan4',
+             height="0.75", width="1")
+
+SetGraphStyle(Simple_data_tree, rankdir = "LR", dpi=70.)
+
+plot(Simple_data_tree, output = "graph")
+```
+
+
+
+```{r, include=F}
+## Get performance metrics
+getPerformanceMetrics <- function(model, newdata = NULL, xval = FALSE) {
+  h2o.performance(model, newdata = newdata, xval = xval)@metrics$thresholds_and_metric_scores %>%
+    as_tibble() %>%
+    mutate(model = model@model_id)
+}
+
+## Plot ROC curve
+plotROC <- function(performance_df) {
+  ggplot(performance_df, aes(fpr, tpr, color = model)) +
+    geom_path() +
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+    coord_fixed() +
+    labs(x = "False Positive Rate", y = "True Positive Rate")
+}
+
+```
+
+
+
+
+**c)** *Build at least 3 models of different families using cross validation, keeping cross validated predictions. You might also try deeplearning.*
+
+I decided to build a lasso, a random forest a gradient boosting and a deeplearning model. (I cannot do xgboost in h2o)
+
+```{r, echo=F, message=F, warning=F}
+glm_model <- h2o.glm(
+  X, y,
+  training_frame = data_train,
+  model_id = "lasso",
+  family = "binomial",
+  alpha = 1,
+  lambda_search = TRUE,
+  seed = my_seed,
+  nfolds = 5,
+  keep_cross_validation_predictions = TRUE
+)
+```
+
+```{r}
+rf_model <- h2o.randomForest(
+  X, y,
+  training_frame = data_train,
+  model_id = "rf",
+  ntrees = 200,
+  max_depth = 10,
+  seed = my_seed,
+  nfolds = 5,
+  keep_cross_validation_predictions = TRUE
+)
+```
+
+```{r}
+gbm_model <- h2o.gbm(
+  X, y,
+  training_frame = data_train,
+  model_id = "gbm",
+  ntrees = 200,
+  max_depth = 5,
+  learn_rate = 0.1,
+  seed = my_seed,
+  nfolds = 5,
+  keep_cross_validation_predictions = TRUE
+)
+```
+
+```{r}
+deeplearning_model <- h2o.deeplearning(
+  X, y,
+  training_frame = data_train,
+  model_id = "deeplearning",
+  hidden = c(32, 8),
+  seed = my_seed,
+  nfolds = 5,
+  keep_cross_validation_predictions = TRUE
+)
+```
+
+
+
+**d)** *Evaluate validation set performance of each model.*
+
+Our models perform similarly. The best based on the ROC curve is the lasso  and the random. More complicated gbm and the deeplearning model performs worse compared to these. 
+
+```{r, echo=F, message=F, warning=F}
+
+my_models <- list(glm_model, rf_model, gbm_model, deeplearning_model)
+
+all_performance <- map_df(c(my_models), getPerformanceMetrics, newdata = data_valid, xval = TRUE)
+
+plotROC(all_performance)
+```
+
+If I include my benchmark models as well it is interesting that both perform really well also outperform the gbm and deeplearning models.
+
+```{r, echo=F, message=F, warning=F}
+all_performance_2 <- map_df(c(simple_models, my_models), getPerformanceMetrics, newdata = data_valid, xval = TRUE)
+
+plotROC(all_performance_2)
+```
+
+
+
+
+
+**e)** *How large are the correlations of predicted scores of the validation set produced by the base learners?*
+
+From the plot you can see that there is different level of correlation between the predicted scores of our base learner models. There  high correlation between the lasso and random forest and moderately high between deeplearning and the lasso and the random forest. On the other hand there is low correlation for the GBM model and the others.
+
+```{r, echo=F, message=F, warning=F}
+h2o.model_correlation_heatmap(c(my_models), data_valid)
+```
+
+
+**f)** *Create a stacked ensemble model from the base learners.*
+
+I created two ensemble models one with glm as the baseline meta-learner, for the other I used gbm.
+
+```{r, message=F, warning=F}
+
+ensemble_model <- h2o.stackedEnsemble(
+  X, y,
+  training_frame = data_train,
+  model_id = "ensemble_glm",
+  base_models = my_models,
+  keep_levelone_frame = TRUE
+)
+```
+
+```{r, message=F, warning=F}
+ensemble_model_gbm <- h2o.stackedEnsemble(
+  X, y,
+  training_frame = data_train,
+  model_id = "ensemble_gbm",
+  metalearner_algorithm = "gbm",
+  base_models = my_models
+)
+
+```
+
+
+**g)** *Evaluate ensembles on validation set. Did it improve prediction?*
+
+It is interesting as the ensemble with glm meta lerner is performing better than all other models but the ensemble with gbm is the worst. I chose the ensemble_glm model as my final one as it is performing best in the validation data set.
+
+```{r, echo=F, message=F, warning=F}
+
+summ <- map_df(
+  c(simple_models, my_models, ensemble_model, ensemble_model_gbm),
+  ~{tibble(model = .@model_id, auc = h2o.auc(h2o.performance(., newdata = data_valid)))}
+)
+
+summ  %>% 
+  kbl() %>% 
+  kable_classic(full_width = F, html_font = "Cambria")
+```
+
+
+**h)** *Evaluate the best performing model on the test set. How does performance compare to that of the validation set?*
+
+It is performing even better on the test set. They are really close there is just a slight improvement in the metric for the test set. With this I can conclude that the model is not overfitting the training data and it performs decently well with totally new data as well. 
+
+**Validation set**
+```{r, echo=F, message=F, warning=F}
+
+h2o.auc(h2o.performance(ensemble_model, newdata = data_valid))
+
+```
+
+**Test set**
+```{r, echo=F, message=F, warning=F}
+h2o.auc(h2o.performance(ensemble_model, newdata = data_test))
+
+```
+
+
+
+
+
+
