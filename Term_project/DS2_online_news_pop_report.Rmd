@@ -1,0 +1,591 @@
+---
+title: "Predict online news popularity"
+subtitle: "Data Science 2 - Exam"
+author: "Viktória Mészáros"
+date: "11/04/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r, include=F}
+# Clear memory
+rm(list=ls())
+
+# Load packages
+library(tidyverse)
+library(caret)
+library(data.table)
+library(GGally)
+library(pROC)
+library(kableExtra)
+library(modelsummary)
+
+my_path <- "c://Users/MViki/Documents/CEU/Winter_semester/DS_2/Term_project/Data/"
+
+
+df <- read.csv(paste0(my_path, "train.csv"))
+
+data_test <- read.csv(paste0(my_path, "test.csv"))
+```
+
+## Aim
+In this project my aim is to predict the popularity of online news. For this I am using a data set containing 27 752 new articles and 60 different characteristics about them. I built several different models from different types. I created a penalized linear model, random forest models, gradient boosting machines and XGBoost models as well as a kmeans model and neural nets with the aim to maximize accuracy.
+
+
+## Exploratory data analysis
+The outcome variable of my analysis will be *is_popular* which is a binary variable 1 indicating a news article is popular and 0 indicating it is not. In my data most of the articles were not popular, and only 20% of them are cataegoriezes as popular. This is not a lot, and if real life data is similar to what I have 80% of the articles should end up being not popular so predicting they are not popular should lead to an 80% accuracy. But this is not the aim of analysis! It is important to note that the smaller amount/ smaller percentage on popular articles makes it harder to predict them accurately. 20% is not too low, so it does not make prediction impossible, only a little bit more difficult.
+
+```{r, echo=F, message=F, warning=F}
+# ggplot(df) +
+#   geom_histogram(aes(is_popular), fill="cyan4")+
+#   theme_light()
+
+df %>% 
+  group_by(is_popular) %>% 
+  summarise("Number of companies" = n(), "Percentage" = paste0(round(n()/27752*100),'%')) %>% 
+  kbl() %>% 
+  kable_classic(full_width = F, html_font = "Cambria")
+
+
+
+```
+
+Lets look at the distribution for all the variables. I decided not to do any transformations and leave the values as they are to keep all the information they contain. I only changed the outcome varibale's data type to factor.
+
+```{r, echo=F, message=F, warning=F}
+df %>%
+  keep(is.numeric) %>% 
+  gather() %>% 
+  ggplot(aes(value)) +
+  facet_wrap(~key, scales = "free") +
+  geom_histogram(color = "cyan4")
+
+```
+
+
+Looking at the correlations we already see some more important variables in prediction of popularity, and also see correlated variables. It is a good idea to built penalized linear models instead of simple linears to deal with this issue. (I tried out taking the log of the skewed variables with a long right tail, but it did not improve my models significantly so decided to keep them as they are)
+
+```{r}
+ggcorr(df)
+```
+
+
+```{r, echo=F, message=F, warning=F}
+df$is_popular <- factor(df$is_popular, levels = 0:1, labels = c("NotPopular", "Popular"))
+
+```
+
+## Train, validation set
+I divided my data to two sets. 80% of observations become part of the train set and I built all my model on this. The remaining 20% was the validation set I used to chose the best models. I t is important to evaluate the models on a validation set and chose the best based on this unknown, new data to avoid over fitting on the train set. All data sets were similar in terms of distribution of the outcome variable which is important. I used a 5 fold cross validation to find the best parameters during the tuning of my models.
+
+```{r, echo=F, message=F, warning=F}
+train_indices <- as.integer(createDataPartition(df$is_popular, p = 0.8, list = FALSE))
+data_train <- df[train_indices, ]
+data_valid <- df[-train_indices, ]
+
+
+Hmisc::describe(df$is_popular)
+Hmisc::describe(data_train$is_popular)
+Hmisc::describe(data_valid$is_popular)
+
+my_seed <- 2021
+
+```
+
+```{r, include=F}
+
+train_control <- trainControl(
+  method = "cv",
+  number = 5,
+  classProbs = TRUE,
+  summaryFunction = twoClassSummary,
+  savePredictions = TRUE
+)
+```
+
+
+## Linear models
+I built 3 linear models. One really basic simple lm model. We already saw that some variables are correlated and there are a lot of them so to solve these issues I built an elastic net model to perform principled variable selection as well as to shrink coefficients. The third model was an elastic net including PCA. For the eleastic net and the elastic net with the PCA I used the same tuning grid where I looked at alpha values from 0 to 1 (by 0.1 steps) and tried out several lambda parameters as well. The best model was the eleastic net without PCA. For this the best tuning parameters were alpha = 1 and lambda = 0.0006158482.   
+ 
+```{r, echo=F, message=F, warning=F}
+#####################
+##  Simple linear  ##
+#####################
+
+# set.seed(my_seed)
+# simple_lm <- train(is_popular~. -article_id, 
+#                    method = "glm",
+#                    data = data_train,
+#                    family = binomial,
+#                    trControl = train_control)
+
+simple_lm <- readRDS(paste0(my_path, "Models/LM.rds"))
+
+####################
+##   Elastic net  ##
+####################
+
+# enet_tune_grid <- expand.grid(
+#   "alpha" = seq(0, 1, by = 0.1),
+#   "lambda" = 10^seq(-1, -7, length = 20)
+# )
+# 
+# set.seed(my_seed)
+# 
+# enet <- train(
+#   is_popular~. -article_id,
+#   data = data_train,
+#   method = "glmnet",
+#   preProcess = c("center", "scale"),
+#   family = "binomial",
+#   trControl = train_control,
+#   tuneGrid = enet_tune_grid
+# )
+# 
+
+enet <- readRDS(paste0(my_path, "Models/Enet.rds"))
+
+#############################
+##   Elastic net with PCA  ##
+#############################
+
+# trctrl_PCA <- trainControl(method = "cv", 
+#                              classProbs=TRUE, 
+#                              summaryFunction=twoClassSummary,
+#                              preProcOptions = list(thresh=0.9)
+# )
+# enet_w_PCA <- train(is_popular~. -article_id, 
+#                                   data = data_train, 
+#                                   method = "glmnet",
+#                                   preProcess=c("center", "scale", "pca"),
+#                                   trControl=trctrl_PCA,
+#                                   tuneLength=10,
+#                                   metric='ROC',
+#                                   tuneGrid = enet_tune_grid
+# )
+
+enet_w_PCA <- readRDS(paste0(my_path, "Models/Enet_w_PCA.rds"))
+
+
+
+lmroc <- roc(
+  predictor=predict(simple_lm, data_valid, type='prob', decision.values=T)$Popular, 
+  response=data_valid$is_popular)
+
+enetroc<- roc(
+  predictor=predict(enet, data_valid, type='prob', decision.values=T)$Popular, 
+  response=data_valid$is_popular)
+
+enetpcaroc <- roc(
+  predictor=predict(enet_w_PCA, data_valid, type='prob', decision.values=T)$Popular, 
+  response=data_valid$is_popular)
+
+sum1 <- c("Simple lm" = lmroc$auc,
+          "Enet" = enetroc$auc,
+          "Enet with PCA" = enetpcaroc$auc)
+
+sum1 %>% 
+  kbl(col.names =  "Validation AUC") %>% 
+   kable_classic(full_width = F, html_font = "Cambria")
+
+```
+
+
+```{r, echo=F, message=F, warning=F, out.width="50%", fig.align='center'}
+plot(enetroc)
+
+## Confusion matrix
+#confusionMatrix(data_valid$is_popular, predict(enet, data_valid, decision.values=T))
+
+
+```
+
+
+
+## Random forest models
+I built 3 random forest models as well. One with less tuning, one with more and an autotune model as a third one. Out of the random forest models the best was the one with the complex tuning. It also outperformed the autotuned model. This also shows the importance of data scientists as they can build better tuning grids than the machine itself. The best random forest model best tuning parameters were mtry = 2, splitrule = gini and min.node.size = 7. The AUC for these models outperform the linear models.
+
+```{r, echo=F, message=F, warning=F}
+#############################
+##   Simple random forest  ##
+#############################
+
+# set tune grid
+# rf_grid <- expand.grid(
+#   .mtry = c(5, 7, 9),
+#   .splitrule = "gini",
+#   .min.node.size = c(5, 10, 15)
+# )
+# 
+# build rf model 1
+# set.seed(my_seed)
+# rf_model <- train(
+#   is_popular~. -article_id,
+#   method = "ranger",
+#   metric = "ROC",
+#   data = data_train,
+#   tuneGrid = rf_grid,
+#   trControl = train_control,
+#   importance = "impurity"
+# )
+
+rf_model <- readRDS(paste0(my_path, "Models/RF_model_1.rds"))
+
+#############################
+##More tuning random forest##
+#############################
+
+# rf_grid2 <- expand.grid(
+#   .mtry = c(2, 3, 4, 5, 6, 7, 8, 9),
+#   .splitrule = "gini",
+#   .min.node.size = c(3, 5, 7, 10)
+# )
+# 
+# # build rf model 2
+# set.seed(my_seed)
+# rf_model_2 <- train(
+#   is_popular~. -article_id,
+#   method = "ranger",
+#   metric = "ROC",
+#   data = data_train,
+#   tuneGrid = rf_grid2,
+#   trControl = train_control,
+#   importance = "impurity")
+
+rf_model_2 <- readRDS(paste0(my_path, "Models/RF_model_2.rds"))
+
+
+#############################
+##  Autotune random forest ##
+#############################
+
+# set.seed(my_seed)
+# rf_model_auto <- train(
+#   is_popular~. -article_id,
+#   data = data_train,
+#   method = "ranger",
+#   metric = "ROC",
+#   trControl = train_control,
+#   importance = "impurity"
+# )
+
+rf_model_auto <- readRDS(paste0(my_path, "Models/RF_model_auto.rds"))
+
+
+rfroc <- roc(
+  predictor=predict(rf_model, data_valid, type='prob', decision.values=T)$Popular, 
+  response=data_valid$is_popular)
+
+rf2roc<- roc(
+  predictor=predict(rf_model_2, data_valid, type='prob', decision.values=T)$Popular, 
+  response=data_valid$is_popular)
+
+rfautoroc <- roc(
+  predictor=predict(rf_model_auto, data_valid, type='prob', decision.values=T)$Popular, 
+  response=data_valid$is_popular)
+
+sum2 <- c("Simple rf" = rfroc$auc,
+          "Complex tuned rf" = rf2roc$auc,
+          "Auto tuned rf" = rfautoroc$auc)
+
+sum2 %>% 
+  kbl(col.names =  "Validation AUC") %>% 
+   kable_classic(full_width = F, html_font = "Cambria")
+
+
+
+```
+
+
+## Gradient boosting
+After random forest I also  trained 3 gradient boosting machines. The first and the second models are GBM models with different levels of tuning. The second is much  more complex, It needed 5 hours to run, but I really wanted to see/find the best tuning oparameters. But it did not worth the time in the end as the XGBoost model outperform both two significantly. It is sourius when looking at as the auc on the train set is around 0.70-0.71. this means that the xgboost fits some kind of pattern in the validation data really well, but probably won't be that good to predict on the test set. Based on the test set AUC values I would still use choose the XGBoost midel and if the pattern in the data I want to predict are the same as in the valudation set, I would have really good predictions.
+
+```{r, echo=F, message=F, warning=F}
+#############################
+##     GBM simple tune     ##
+#############################
+# gbm_grid <-  expand.grid(interaction.depth = c(1, 5, 10), 
+#                          n.trees = (4:10)*50,
+#                          shrinkage = 0.1,
+#                          n.minobsinnode = 20 
+# )
+# 
+# 
+# set.seed(my_seed)
+# gbm_model <- train(is_popular~. -article_id,
+#                    data = data_train,
+#                    method = "gbm",
+#                    metric = "ROC",
+#                    trControl = train_control,
+#                    verbose = FALSE,
+#                    tuneGrid = gbm_grid)
+
+gbm_model <- readRDS(paste0(my_path, "Models/GBM_model_1.rds"))
+
+
+#############################
+##     GBM complex tune    ##
+#############################
+# gbm_grid2 <-  expand.grid(interaction.depth = c(1, 3, 5, 7, 9, 11), 
+#                           n.trees = (1:10)*50, 
+#                           shrinkage = c(0.02, 0.05, 0.1, 0.15, 0.2), 
+#                           n.minobsinnode = c(5,10,20,30))
+# 
+# set.seed(my_seed)
+# system.time({
+#   gbm_model_2 <- train(is_popular~. -article_id,
+#                        data = data_train,
+#                        method = "gbm",
+#                        metric = "ROC",
+#                        trControl = train_control,
+#                        verbose = FALSE,
+#                        tuneGrid = gbm_grid2)
+# })
+
+gbm_model_2 <- readRDS(paste0(my_path, "Models/GBM_model_2.rds"))
+
+
+#############################
+##         XGBoost         ##
+#############################
+# xg_grid <-  expand.grid(
+#   nrounds=c(350),
+#   max_depth = c(2, 3, 4, 5),
+#   eta = c(0.03,0.05, 0.06),
+#   gamma = c(0.01),
+#   colsample_bytree = c(0.5),
+#   subsample = c(0.75),
+#   min_child_weight = c(0))
+# 
+# set.seed(my_seed)
+# 
+# xgb_model_2 <- train(
+#   is_popular~.,
+#   method = "xgbTree",
+#   metric = "ROC",
+#   data = data_train,
+#   tuneGrid = xg_grid,
+#   trControl = train_control
+# )
+
+xgb_model_2 <- readRDS(paste0(my_path, "Models/XGB_model_2.rds"))
+
+
+
+gbmroc <- roc(
+  predictor=predict(gbm_model, data_valid, type='prob', decision.values=T)$Popular, 
+  response=data_valid$is_popular)
+
+gbm2roc<- roc(
+  predictor=predict(gbm_model_2, data_valid, type='prob', decision.values=T)$Popular, 
+  response=data_valid$is_popular)
+
+xgbroc <- roc(
+  predictor=predict(xgb_model_2, data_valid, type='prob', decision.values=T)$Popular, 
+  response=data_valid$is_popular)
+
+## ROC on train set
+my_models <- list( "gbm_model", "gbm_model_2", "xgb_model_2")
+ROC <- c()
+for (i in my_models) {
+  ROC[i]  <- max(get(i)$results$ROC)
+}
+ROC %>% 
+  kbl(col.names = "Train AUC") %>% 
+  kable_classic(full_width = F, html_font = "Cambria")
+
+
+## AUC on validation set
+sum3 <- c("Simple GBM" = gbmroc$auc,
+          "Complex tuned GBM" = gbm2roc$auc,
+          "XGBoost" = xgbroc$auc)
+
+
+sum3 %>% 
+  kbl(col.names =  "Validation AUC") %>% 
+   kable_classic(full_width = F, html_font = "Cambria")
+```
+
+
+
+
+```{r, echo=F, message=F, warning=F, fig.align='center', out.width='50%'}
+plot(xgbroc)
+
+```
+
+
+## Neural nets
+Finally I built two neural net model, one basic and one with different starting points. I considered some different tuning opportunities here as well. You can check the codes for all the values I checked. The simple nnet model turned out to be better.
+
+```{r, echo=F, message=F, warning=F}
+#############################
+##         NNet 1          ##
+#############################
+# tune_grid <- expand.grid(
+#   size = c(3, 5, 7, 10, 15),
+#   decay = c(0.1, 0.5, 1, 1.5, 2, 2.5, 5)
+# )
+# 
+# set.seed(my_seed)
+# nnet_model <- train(
+#   is_popular~. -article_id,
+#   method = "nnet",
+#   data = data_train,
+#   trControl = train_control,
+#   tuneGrid = tune_grid,
+#   preProcess = c("center", "scale", "pca"),
+#   metric = "ROC",
+#   trace = FALSE
+# )
+
+
+nnet_model <- readRDS(paste0(my_path, "Models/NNet_model.rds"))
+
+
+#######################################
+## NNet 2 with different start point ##
+#######################################
+# tune_grid <- expand.grid(size = 5, decay = 1, bag = FALSE)
+# 
+# set.seed(my_seed)
+# avnnet_model <- train(
+#   is_popular~. -article_id,
+#   method = "avNNet",
+#   data = data_train,
+#   repeats = 5,
+#   trControl = train_control,
+#   tuneGrid = tune_grid,
+#   preProcess = c("center", "scale", "pca"),
+#   metric = "ROC",
+#   trace = FALSE
+# )
+
+avnnet_model <- readRDS(paste0(my_path, "Models/AVNNet_model.rds"))
+
+
+nnroc <- roc(
+  predictor=predict(nnet_model, data_valid, type='prob', decision.values=T)$Popular, 
+  response=data_valid$is_popular)
+
+nn2roc<- roc(
+  predictor=predict(avnnet_model, data_valid, type='prob', decision.values=T)$Popular, 
+  response=data_valid$is_popular)
+
+
+## AUC on validation set
+sum4 <- c("NNet model" = nnroc$auc,
+          "AVNNet model" = nn2roc$auc)
+
+
+sum4 %>% 
+  kbl(col.names =  "Validation AUC") %>% 
+   kable_classic(full_width = F, html_font = "Cambria")
+
+```
+
+
+```{r, echo=F, message=F, warning=F, out.width="50%", fig.align='center'}
+plot(nnroc)
+
+```
+
+
+
+## Summary
+Out of all my models if I really want to select based on the AUC values on the validation set I would choose the XGBoost model but as we saw there is something interesting going on. When I uploaded the best models off all categories it turned out that the best random forest rf 2 gave the best prediction on the test sets. It is due to that probably it captures best those patterns that are represented in the test set. Most models perform really close, with similar AUC values,  so in a business situation I would use all of them to predict outcomes and compare the prediction to get the most out of my data. 
+
+## Extra 
+There is a methos to summarize the findings of more models to a final summary model with stacking oif them. I would need to stack the models I uilt together and use tham together to predict the results. As I built the models using caret, but we only covered how to build stacked models using H2O, I built 4 baseline learners one glm, one random forest, one gbm and one deeplearning model in H2o and stacked these together. Unfortunately the performance of the model was lower than I expected as all the model tuning was lost that I done during other models.
+
+```{r, echo=F, message=F, warning=F}
+# glm_model_s <- h2o.glm(
+#   X, y,
+#   training_frame = data_train_h2o,
+#   model_id = "lasso",
+#   family = "binomial",
+#   alpha = 1,
+#   lambda_search = TRUE,
+#   seed = my_seed,
+#   nfolds = 5,
+#   keep_cross_validation_predictions = TRUE  # this is necessary to perform later stacking
+# )
+# 
+# rf_model_s <- h2o.randomForest(
+#   X, y,
+#   training_frame = data_train_h2o,
+#   model_id = "rf",
+#   ntrees = 200,
+#   max_depth = 10,
+#   seed = my_seed,
+#   nfolds = 5,
+#   keep_cross_validation_predictions = TRUE
+# )
+# 
+# gbm_model_s <- h2o.gbm(
+#   X, y,
+#   training_frame = data_train_h2o,
+#   model_id = "gbm",
+#   ntrees = 200,
+#   max_depth = 5,
+#   learn_rate = 0.1,
+#   seed = my_seed,
+#   nfolds = 5,
+#   keep_cross_validation_predictions = TRUE
+# )
+# 
+# deeplearning_model_s <- h2o.deeplearning(
+#   X, y,
+#   training_frame = data_train_h2o,
+#   model_id = "deeplearning",
+#   hidden = c(32, 8),
+#   seed = my_seed,
+#   nfolds = 5,
+#   keep_cross_validation_predictions = TRUE
+# )
+# 
+
+# ensemble_model <- h2o.stackedEnsemble(
+#   X, y,
+#   training_frame = data_train_h2o,
+#   base_models = my_models,
+#   keep_levelone_frame = TRUE
+# )
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
